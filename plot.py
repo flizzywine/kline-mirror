@@ -34,7 +34,7 @@ def MA(S,N):              #求序列的N日简单移动平均值，返回序列
 
 
 def plot_kline_fig(df, cur_date, height=500):
-    """需要满足, df 中有 columns: data_dt, chg, open, close, high, low, amount"""
+    """需要满足, df 中有 columns: data_dt, chg, open, close, high, low, amt"""
     dates = df['data_dt']
     
     cur_date = pd.to_datetime(cur_date, format="%Y.%m.%d")
@@ -117,7 +117,8 @@ def read_kline_df(data_dt, ts_code, type="股票"):
         cur_date = {data_dt}
         start_date = temporalAdd(cur_date, -20, "SSE") // 交易日偏移
         end_date = temporalAdd(cur_date, 20, "SSE") // 交易日偏移
-        select * from daily_adj where data_dt between start_date:end_date and ts_code = `{ts_code}
+        select data_dt, ts_code, chg, open, high, low, close, amt/100000 as amt 
+            from daily_adj where data_dt between start_date:end_date and ts_code = `{ts_code}
         """
     
     elif type == "综合指数":

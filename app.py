@@ -174,29 +174,37 @@ def get_sql(data_dt, tag):
 @st.cache_data
 def merge_set(tags , data_dt, prefs):
     """每个条件形成一个SQL,  然后intersect形成交集"""
-    sql_list = []  
+    conn.run("stock_ind = loadTable('dfs://stock', 'stock_ind'); basic = loadTable('dfs://stock', 'basic');")
+    # conn.upload({'tags':tags})
+    # sql_list = []  
+    conn.run("final = set((select ts_code from basic where 1=0)['ts_code'])")
     for tag in tags:
         tag_sql = get_sql(data_dt, tag)
-        sql_list.append(tag_sql)
-    if len(sql_list) == 0:
-        return None
-    elif len(sql_list) == 1:
-        final_sql = sql_list[0]
+        conn.run(f"""tmp = set(({tag_sql})['ts_code']);""")
+        conn.run(f"""if (size(final) == 0) final = tmp else final = final & tmp;""")
+    
+    #     # sql_list.append(tag_sql)
+    # conn.run(f"final = {' & '.join(['tag_'+str(i) for i in range(len(tags))])}")
+    # if len(tags) == 0:
+    #     return conn.run("final = select null as name, null as ts_code")
+    # elif len(sql_list) == 1:
+    #     final_sql = sql_list[0]
+    # else:
+    #     final_sql = " INTERSECT ".join(sql_list)
+
+    # if st.session_state["prefs"]  == "低位": # 偏好低位
+    #     order_by_col = "a.bl_amt asc"
+    # elif st.session_state["prefs"]  == "中位": # 偏好中位, 也即, 5日线靠近10日线
+    #     order_by_col = "a.bl_mid asc"
+    # else: # 默认, 偏好高位
+    #     order_by_col = "a.dl desc"
+    if conn.run("size(final)>0"):
+        stock_list_df = conn.run(f"""select b.name, b.ts_code from stock_ind a
+             left join basic b on a.ts_code = b.ts_code
+              where ts_code in final and a.data_dt={data_dt} order by a.dl desc;""")
     else:
-        final_sql = " INTERSECT ".join(sql_list)
+        stock_list_df = None
 
-    if st.session_state["prefs"]  == "低位": # 偏好低位
-        order_by_col = "a.bl_amt asc"
-    elif st.session_state["prefs"]  == "中位": # 偏好中位, 也即, 5日线靠近10日线
-        order_by_col = "a.bl_mid asc"
-    else: # 默认, 偏好高位
-        order_by_col = "a.dl desc"
-
-    conn.run("stock_ind = loadTable('dfs://stock', 'stock_ind'); basic = loadTable('dfs://stock', 'basic');")
-    final_sql = f"""select b.name, a.ts_code from stock_ind a left join basic b on a.ts_code = b.ts_code 
-    where a.ts_code in ({final_sql}) and a.data_dt={data_dt} order by {order_by_col}"""
-        
-    stock_list_df = conn.run(final_sql)
     st.write(f"{len(stock_list_df)}个股票")
     return stock_list_df
     

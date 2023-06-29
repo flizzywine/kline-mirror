@@ -347,3 +347,10 @@ daily_adj = loadTable('dfs://stock', 'daily_adj')
 daily = loadTable('dfs://stock', 'daily')
 adj_factor = loadTable('dfs://stock', 'adj_factor')
 
+def merge_set(sql_list) {
+    if (size(sql_list) == 0) return null
+    final = set([])
+    for (sql in sql_list) {
+        tmp = sql.execute().toDataFrame()
+    }
+}
