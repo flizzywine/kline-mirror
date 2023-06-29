@@ -1,0 +1,349 @@
+
+
+def write_table(tab_name, t) {
+    db = database("dfs://stock")
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt = db.createPartitionedTable(t, tab_name, `data_dt)
+    pt.append!(select * from t)
+}
+
+def init_market_index(start_date, end_date) {
+    db = database("dfs://stock")
+    pt = db.loadTable(`daily_adj)
+    t2 = select data_dt, ts_code, open\close as open_pct,
+                    high\close as high_pct, low\close as low_pct, ratios(close) as close_pct,
+                    amt\100000 as amt
+        from pt where data_dt between start_date:end_date  context by ts_code
+
+    t3 = select data_dt, avg(open_pct) as open_pct, avg(high_pct) as high_pct, 
+        avg(low_pct) as low_pct, avg(close_pct) as close_pct, sum(amt) as amt from t2 group by data_dt
+
+    t4 = select data_dt, cumprod(close_pct) as cum_close, amt , 100*(close_pct-1) as chg ,
+         open_pct, high_pct, low_pct, close_pct from t3
+    update t4 set 
+                cum_open = cum_close*open_pct
+                 from t4
+    update t4 set cum_high = max(cum_close*(1+ (high_pct-1)\3), max(cum_open, cum_close)),
+                cum_low = min(cum_close*(1+ (low_pct-1)\3), min(cum_close, cum_open))
+                 from t4
+    t5 = select data_dt, cum_open,cum_low,cum_high,cum_close, amt, chg from t4
+    
+    tab_name = `market_index
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt2 = db.createPartitionedTable(t5, tab_name, `data_dt)
+    pt2.append!(select * from t5)
+}
+// market_index 在新增的时候,需要做什么呢?? 
+
+def update_market_index() {
+    db = database("dfs://stock")
+    daily_adj = db.loadTable(`daily_adj)
+    market_index = db.loadTable(`market_index)
+    pre_date = select max(data_dt) from market_index
+    start_date = temporalAdd(select max(data_dt) from market_index, 1, 'SSE')
+    write_start_date = select max(data_dt) from market_index
+    end_date = select max(data_dt) from daily_adj
+    
+    t2 = select data_dt, ts_code, open\close as open_pct,
+                    high\close as high_pct, low\close as low_pct, ratios(close) as close_pct,
+                    amt\100000 as amt
+        from daily_adj where data_dt between start_date:end_date context by ts_code
+
+    t3 = select data_dt, avg(open_pct) as open_pct, avg(high_pct) as high_pct, 
+        avg(low_pct) as low_pct, avg(close_pct) as close_pct, sum(amt) as amt from t2 group by data_dt
+
+    t4 = select data_dt, cumprod(close_pct) as cum_close, amt , 100*(close_pct-1) as chg ,
+         open_pct, high_pct, low_pct, close_pct from t3
+    update t4 set 
+                cum_open = cum_close*open_pct
+                 from t4
+    update t4 set cum_high = max(cum_close*(1+ (high_pct-1)\3), max(cum_open, cum_close)),
+                cum_low = min(cum_close*(1+ (low_pct-1)\3), min(cum_close, cum_open))
+                 from t4
+
+    prev_cum_open = select cum_open from market_index where data_dt = pre_date
+    prev_cum_close = select cum_close from market_index where data_dt = pre_date
+    prev_cum_high = select cum_high from market_index where data_dt = pre_date
+    prev_cum_low = select cum_low from market_index where data_dt = pre_date
+    t5 = select data_dt, cum_open*prev_cum_open as cum_open, 
+        cum_low*prev_cum_low as cum_low, 
+        cum_high*prev_cum_high as cum_high,
+        cum_close*prev_cum_close as cum_close, 
+        amt, chg from t4
+    
+    market_index.append!(select * from t5 where data_dt > write_start_date)
+}
+
+// 如果要更新,就要 计算当天的昨天的差距, 然后, 把整个流程重走一遍.
+
+
+def init_stock_ma(start_date, end_date) {
+    db = database("dfs://stock")
+    daily_adj = db.loadTable(`daily_adj)
+    tab_name = `stock_ma
+    t1 = select data_dt, ts_code, chg, close, high, low, open, amt/100000 as amt, mavg(close, 3) as ma3, mavg(close, 5) as ma5, 
+    mavg(close, 10) as ma10, mavg(close, 20) as ma20, mavg(close, 60) as ma60
+     from daily_adj where data_dt between start_date:end_date context by ts_code
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    stock_ma = db.createPartitionedTable(t1, `stock_ma, `data_dt)
+    stock_ma.append!(select * from t1)
+}
+
+def update_stock_ma() {
+    db = database("dfs://stock")
+    daily_adj = db.loadTable(`daily_adj)
+    stock_ma = db.loadTable(`stock_ma)
+    start_date = temporalAdd(select max(data_dt) from stock_ma, -60, 'SSE')
+    write_start_date = select max(data_dt) from stock_ma
+    end_date = select max(data_dt) from daily_adj
+    t1 = select data_dt, ts_code, chg, close, high, low, open, amt/100000 as amt, mavg(close, 3) as ma3, mavg(close, 5) as ma5, 
+    mavg(close, 10) as ma10, mavg(close, 20) as ma20, mavg(close, 60) as ma60
+     from daily_adj where data_dt between start_date:end_date context by ts_code
+    stock_ma.append!(select * from t1 where data_dt > write_start_date)
+}
+
+// 在计算 stock_ma的时候, 如果是追加, 不能只追加当天, 必须把限制日期, 放松到60天以前,不然是没数据的.
+// 计算 stock_ind 的时候, 日期要放到 20天前, 然后只取当天的追加进去.
+// market_index 
+
+
+def init_stock_ind(start_date, end_date) {
+    tab_name = "stock_ind"
+    db = database("dfs://stock")
+    pt = db.loadTable(`stock_ma)
+    t1 = select data_dt, ts_code, amt, chg,
+        (close-ma20)/ma20*sqrt(amt+5)  as dl,
+        100*close/move(close, 5) as zf5,
+        100*move(close,5)/move(close, 10) as zf5_10,
+        abs(ma5-ma20)/ma20  + abs(ma5-ma10)/ma10 as bl,
+        abs(ma5-ma10)/ma10 as bl_mid
+       from pt where data_dt between start_date:end_date
+       context by ts_code
+
+    update t1 set bl_amt = bl * sqrt(amt) from t1
+    update t1 set ql = mmax(chg, 7) * abs(1\bl_amt) from t1
+
+    update t1 set rn_dl_desc = rank(dl, ascending=false) from t1 context by data_dt 
+    update t1 set rn_dl_asc = rank(dl, ascending=true) from t1 context by data_dt 
+    update t1 set rn_zf5_desc = rank(zf5, ascending=false) from t1 context by data_dt 
+    update t1 set rn_zf5_asc = rank(zf5, ascending=true) from t1 context by data_dt
+    update t1 set rn_bl_amt_asc = rank(bl_amt, ascending=true) from t1 context by data_dt 
+    update t1 set rn_bl_mid_asc = rank(bl_mid, ascending=true) from t1 context by data_dt 
+    update t1 set rn_ql_desc = rank(ql, ascending=false) from t1 context by data_dt 
+    write_table(tab_name, t1)
+}
+
+def update_stock_ind() {
+    tab_name = "stock_ind"
+    db = database("dfs://stock")
+    stock_ma = db.loadTable(`stock_ma)
+    stock_ind = db.loadTable(`stock_ind)
+    start_date = temporalAdd(select max(data_dt) from stock_ind, -20, 'SSE')
+    write_start_date = select max(data_dt) from stock_ind
+    end_date = select max(data_dt) from stock_ma
+    t1 = select data_dt, ts_code, amt, chg,
+        (close-ma20)/ma20*sqrt(amt+5)  as dl,
+        100*close/move(close, 5) as zf5,
+        100*move(close,5)/move(close, 10) as zf5_10,
+        abs(ma5-ma20)/ma20  + abs(ma5-ma10)/ma10 as bl,
+        abs(ma5-ma10)/ma10 as bl_mid
+       from stock_ma where data_dt between start_date:end_date
+       context by ts_code
+
+    update t1 set bl_amt = bl * sqrt(amt) from t1
+    update t1 set ql = mmax(chg, 7) * abs(1\bl_amt) from t1
+
+    update t1 set rn_dl_desc = rank(dl, ascending=false) from t1 context by data_dt 
+    update t1 set rn_dl_asc = rank(dl, ascending=true) from t1 context by data_dt 
+    update t1 set rn_zf5_desc = rank(zf5, ascending=false) from t1 context by data_dt 
+    update t1 set rn_zf5_asc = rank(zf5, ascending=true) from t1 context by data_dt
+    update t1 set rn_bl_amt_asc = rank(bl_amt, ascending=true) from t1 context by data_dt 
+    update t1 set rn_bl_mid_asc = rank(bl_mid, ascending=true) from t1 context by data_dt 
+    update t1 set rn_ql_desc = rank(ql, ascending=false) from t1 context by data_dt 
+
+    stock_ma.append!(select * from t1 where data_dt > write_start_date)
+}
+
+def init_concept_ind(start_date, end_date) {
+    tab_name = "concept_ind"
+    db = database("dfs://stock")
+    stock_ind = db.loadTable(`stock_ind)
+    concept_cons = db.loadTable("concept_cons") // TODO
+    t1 = select a.data_dt,  b.concept, 
+            sqrt(count(*)) as cnt_sqrt,
+            avg(signum(dl)*pow(dl ,2)) as dl,
+            avg(signum(chg)*pow(chg,2)*(amt+5)) as chg,
+            avg(signum(ql)*pow(ql,2)) as ql
+        from stock_ind a
+        left join concept_cons b on a.ts_code = b.ts_code
+        where a.data_dt between start_date:end_date
+        group by a.data_dt, b.concept
+
+    update t1 set dl = dl * cnt_sqrt from t1
+    update t1 set chg = chg * cnt_sqrt from t1
+    update t1 set ql = ql * cnt_sqrt from t1
+    
+    update t1 set rn_dl_desc = rank(dl, ascending=false) from t1 context by data_dt 
+    update t1 set rn_dl_asc = rank(dl, ascending=true) from t1 context by data_dt 
+    update t1 set rn_chg_desc = rank(chg, ascending=false) from t1 context by data_dt 
+    update t1 set rn_chg_asc = rank(chg, ascending=true) from t1 context by data_dt
+    update t1 set rn_ql_desc = rank(ql, ascending=false) from t1 context by data_dt 
+    update t1 set rn_ql_asc = rank(ql, ascending=true) from t1 context by data_dt
+    write_table(tab_name, t1)
+}
+
+def update_concept_ind() {
+    tab_name = "concept_ind"
+    db = database("dfs://stock")
+    stock_ind = db.loadTable(`stock_ind)
+    concept_cons = db.loadTable("concept_cons") // TODO
+    concept_ind = db.loadTable(`concept_ind)
+    start_date = temporalAdd(select max(data_dt) from concept_ind, 1, 'SSE')
+    write_start_date = select max(data_dt) from concept_ind
+    end_date = select max(data_dt) from stock_ind
+
+    t1 = select a.data_dt,  b.concept, 
+            sqrt(count(*)) as cnt_sqrt,
+            avg(signum(dl)*pow(dl ,2)) as dl,
+            avg(signum(chg)*pow(chg,2)*(amt+5)) as chg,
+            avg(signum(ql)*pow(ql,2)) as ql
+        from stock_ind a
+        left join concept_cons b on a.ts_code = b.ts_code
+        where a.data_dt between start_date:end_date
+        group by a.data_dt, b.concept
+
+    update t1 set dl = dl * cnt_sqrt from t1
+    update t1 set chg = chg * cnt_sqrt from t1
+    update t1 set ql = ql * cnt_sqrt from t1
+    
+    update t1 set rn_dl_desc = rank(dl, ascending=false) from t1 context by data_dt 
+    update t1 set rn_dl_asc = rank(dl, ascending=true) from t1 context by data_dt 
+    update t1 set rn_chg_desc = rank(chg, ascending=false) from t1 context by data_dt 
+    update t1 set rn_chg_asc = rank(chg, ascending=true) from t1 context by data_dt
+    update t1 set rn_ql_desc = rank(ql, ascending=false) from t1 context by data_dt 
+    update t1 set rn_ql_asc = rank(ql, ascending=true) from t1 context by data_dt
+
+    concept_ind.append!(select * from t1 where data_dt > write_start_date)
+}
+
+
+
+// init_market_index()
+// init_stock_ma()
+// init_stock_ind()
+// init_concept_ind()
+
+
+def init_db() {
+    if existsDatabase("dfs://stock"){
+        dropDatabase("dfs://stock")
+    }
+    db= database("dfs://stock", RANGE, 2019.01.01 2020.01.01 2021.01.01 2024.01.02)
+}
+
+def load_daily_adj() {
+    db = database("dfs://stock")
+    t = ploadText("/data/ddb/server/data/daily_adj.csv")
+    tab_name = `daily_adj
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt=db.createPartitionedTable(t,tab_name,  `data_dt)
+    pt.tableInsert(select * from t)
+}
+def load_cal2() {
+    db = database("dfs://stock")
+    t = ploadText("/data/ddb/server/data/cal2.csv")
+    pt = db.createPartitionedTable(t,`cal2,  `t0)
+    pt.tableInsert(select * from t)
+}
+def load_concept_cons_xgb() {
+
+    db = database("dfs://stock")
+    t = ploadText("/data/ddb/server/data/concept_cons_xgb.csv")
+    t2 = ploadText("/data/ddb/server/data/basic.csv")
+    // 把symbol转成ts_code.
+    tab_name = `concept_cons_xgb
+    t3 = select t.desc, ts_code, concept from t
+        left join t2 on t.symbol = t2.symbol
+    
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt=db.createTable(t3, tab_name)
+    pt.tableInsert(select * from t3)
+}
+def load_daily() {
+    db = database("dfs://stock")
+    t = ploadText("/data/ddb/server/data/daily.csv")
+    // 把symbol转成ts_code.
+    tab_name = `daily
+   
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt=db.createTable(t, tab_name)
+    pt.tableInsert(select * from t)
+}
+
+def load_adj_factor() {
+    tab_name = 'adj_factor'
+    db = database("dfs://stock")
+    t = ploadText("/data/ddb/server/data/adj_factor.csv")
+    
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt=db.createTable(t, tab_name)
+    pt.tableInsert(select * from t)
+}
+
+
+def load_basic() {
+    db = database("dfs://stock")
+    t = ploadText("/data/ddb/server/data/basic.csv")
+    tab_name = `basic
+    if (existsTable("dfs://stock", tab_name)) db.dropTable(tab_name)
+    pt=db.createTable(t, tab_name)
+    pt.tableInsert(select * from t)
+}
+
+def load_data() {
+    // 会删除之前的所有数据
+    login(`admin, `123456)
+    init_db()
+    load_daily_adj()
+    load_cal2()
+    load_concept_cons_xgb()
+}
+
+
+def make_daily_adj () {
+    start_date = 2010.01.01
+    end_date = 2023.02.27
+    db = database("dfs://stock")
+    daily = loadTable('dfs://stock', 'daily')
+    adj_factor = loadTable('dfs://stock', 'adj_factor')
+    //select * from daily limit 10 // ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount
+
+    //select * from adj_factor limit 10 // ts_code, trade_date, adj_factor
+
+    //select * from daily_adj limit 10  // data_dt, ts_code, chg, open, high, low, close, amt
+
+    t1 = select  distinct a.trade_date as data_dt, a.ts_code, a.pct_chg as chg, 
+            a.open*b.adj_factor as open, 
+            a.high*b.adj_factor as high, 
+            a.low*b.adj_factor as low, 
+            a.close*b.adj_factor as close,  
+            a.amount as amt
+        from daily a
+        left join adj_factor b on a.ts_code = b.ts_code and a.trade_date = b.trade_date
+        where a.trade_date between start_date:end_date
+
+    delete from daily_adj where data_dt between start_date:end_date
+    daily_adj.append!(select * from t1)
+
+    select distinct data_dt from daily_adj order by data_dt asc
+}
+
+
+market_index = loadTable('dfs://stock','market_index');
+stock_ma = loadTable('dfs://stock', 'stock_ma');
+stock_ind = loadTable('dfs://stock', 'stock_ind');
+concept_ind = loadTable('dfs://stock', 'concept_ind');
+daily_adj = loadTable('dfs://stock', 'daily_adj')
+daily = loadTable('dfs://stock', 'daily')
+adj_factor = loadTable('dfs://stock', 'adj_factor')
+

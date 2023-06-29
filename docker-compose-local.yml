@@ -1,0 +1,19 @@
+version: '3.3'
+services:
+  dolphindb:
+    image: dolphindb/dolphindb:v2.00.9.8
+    ports:
+      - "8848:8848"
+    volumes:
+      - /Users/cf/Documents/kline/data:/data/ddb/server/data 
+    command: ["tail", "-f", "/dev/null"]
+
+  streamlit:
+    image: kline_mirror
+    ports:
+      - "8501:8501"
+    volumes:
+      - /Users/cf/Documents/kline/kline_mirror/:/app
+    depends_on:
+      - dolphindb
+    command: ["streamlit", "run", "app.py"]

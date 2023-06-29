@@ -1,0 +1,7 @@
+streamlit
+tushare
+akshare
+bs4
+streamlit-aggrid
+streamlit-option-menu
+plotly
